@@ -27,7 +27,7 @@ parameters {
 model {
     x_beta ~ normal(0, 100);
     baseline_sigma ~ normal(0, 100);
-  //  interval_beta ~ normal(0, baseline_sigma); 
+    interval_beta ~ normal(0, baseline_sigma); 
 
   for (i in 1:NR)
     target += custom_exp_likelihood(status[i], x[i], interval_fu_time[i], interval_beta[interval[i]], x_beta);

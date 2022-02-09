@@ -18,6 +18,7 @@
 */
 // Jacqueline Buros Novik <jackinovik@gmail.com>
 
+
 data {
   // dimensions
   int<lower=1> N;
@@ -40,7 +41,7 @@ transformed data {
   int n_trans[S, T];  
   
   log_t_dur = log(t_dur);
-
+  
   // n_trans used to map each sample*timepoint to n (used in gen quantities)
   // map each patient/timepoint combination to n values
   for (n in 1:N) {
@@ -62,22 +63,22 @@ transformed data {
               last_value = n_trans[samp, tp];
           }
       }
-  }  
+  }
 }
 parameters {
   vector[T] log_baseline_raw; // unstructured baseline hazard for each timepoint t
-  vector[M] beta;         // beta for each covariate
+  vector[M] beta;                      // beta for each covariate
   real<lower=0> baseline_sigma;
   real log_baseline_mu;
 }
 transformed parameters {
   vector[N] log_hazard;
-  vector[T] log_baseline;     // unstructured baseline hazard for each timepoint t
+  vector[T] log_baseline;
   
-  log_baseline = log_baseline_mu + log_baseline_raw + log_t_dur;
+  log_baseline = log_baseline_raw + log_t_dur;
   
   for (n in 1:N) {
-    log_hazard[n] = log_baseline[t[n]] + x[n,]*beta;
+    log_hazard[n] = log_baseline_mu + log_baseline[t[n]] + x[n,]*beta;
   }
 }
 model {
@@ -85,22 +86,25 @@ model {
   event ~ poisson_log(log_hazard);
   log_baseline_mu ~ normal(0, 1);
   baseline_sigma ~ normal(0, 1);
-  log_baseline_raw ~ normal(0, baseline_sigma);
+  log_baseline_raw[1] ~ normal(0, 1);
+  for (i in 2:T) {
+      log_baseline_raw[i] ~ normal(log_baseline_raw[i-1], baseline_sigma);
+  }
 }
 generated quantities {
   real log_lik[N];
   vector[T] baseline;
+  int y_hat_mat[S, T];     // ppcheck for each S*T combination
   real y_hat_time[S];      // predicted failure time for each sample
   int y_hat_event[S];      // predicted event (0:censor, 1:event)
   
   // compute raw baseline hazard, for summary/plotting
-  baseline = exp(log_baseline_mu + log_baseline_raw);
+  baseline = exp(log_baseline_raw);
   
-  // prepare log_lik for loo-psis
   for (n in 1:N) {
-      log_lik[n] = poisson_log_lpmf(event[n] | log_hazard[n]);
+      log_lik[n] <- poisson_log_lpmf(event[n] | log_hazard[n]);
   }
-
+  
   // posterior predicted values
   for (samp in 1:S) {
       int sample_alive;
@@ -111,32 +115,36 @@ generated quantities {
               int pred_y;
               real log_haz;
               
-              // determine predicted value of this sample's hazard
+              // determine predicted value of y
+              // (need to recalc so that carried-forward data use sim tp and not t[n])
               n = n_trans[samp, tp];
-              log_haz = log_baseline[tp] + x[n,] * beta;
-              
-              // now, make posterior prediction of an event at this tp
+              log_haz = log_baseline_mu + log_baseline[tp] + x[n,]*beta;
               if (log_haz < log(pow(2, 30))) 
                   pred_y = poisson_log_rng(log_haz);
               else
                   pred_y = 9; 
               
-              // summarize survival time (observed) for this pt
+              // mark this patient as ineligible for future tps
+              // note: deliberately make 9s ineligible 
               if (pred_y >= 1) {
-                  // mark this patient as ineligible for future tps
-                  // note: deliberately treat 9s as events 
                   sample_alive = 0;
                   y_hat_time[samp] = t_obs[tp];
                   y_hat_event[samp] = 1;
               }
               
+              // save predicted value of y to matrix
+              y_hat_mat[samp, tp] = pred_y;
           }
+          else if (sample_alive == 0) {
+              y_hat_mat[samp, tp] = 9;
+          } 
       } // end per-timepoint loop
       
       // if patient still alive at max
+      // 
       if (sample_alive == 1) {
           y_hat_time[samp] = t_obs[T];
           y_hat_event[samp] = 0;
       }
-  } // end per-sample loop  
+  } // end per-sample loop
 }

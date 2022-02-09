@@ -1,9 +1,14 @@
+##############################################################################################################################
 #
 # Piecewise Exponential Model in Stan
 # Shamil Sadikhov
-
+#
 # Source: https://rpubs.com/kaz_yos/surv_stan_piecewise1
-
+#
+#
+## Plotting predicted results: https://rstudio-pubs-static.s3.amazonaws.com/435225_07b4ab5afa824342a4680c9fb2de6098.html
+#
+##############################################################################################################################
 
 require(dplyr)
 require(rstan)
@@ -12,6 +17,9 @@ library(survival)
 library(rstanarm)
 library(broom)
 library(directlabels)
+library(bayesplot)
+require(tidybayes)
+require(survminer)
 
 
 
@@ -22,6 +30,15 @@ leukemia <- tibble(leukemia) %>%
                 mutate(id = seq_len(n())) %>%
                 select(id, everything())
 leukemia
+
+
+# plot KM
+
+require("survival")
+fit <- survfit(Surv(time, status) ~ x, data = leukemia)
+
+ggsurvplot(fit, data = leukemia)
+
 
 ## One piece
 cut_one <- max(leukemia$time) + 1
@@ -79,15 +96,15 @@ leukemia_three
 
 ## Split at event times
 leukemia_events <- survival::survSplit(formula = Surv(time, status) ~ ., data = leukemia, cut = cut_events) %>%
-  mutate(interval = factor(tstart),
-         interval_length = time - tstart) %>%
-  as_data_frame
+                   mutate(interval = factor(tstart),
+                   interval_length = time - tstart) %>%
+                    as_data_frame
 leukemia_events
 
 # add timepoint id
-leukemia_events %<>% group_by(id) %>% mutate(tid = seq_along(id))
 # leukemia_events %<>% group_by(id) %>% mutate(tid = seq_along(id))
 
+leukemia_events$tid <-  with(leukemia_events, match(time, sort(unique(time))))
 
 ##############################################################################################################################
 ## Split at event and censoring times
@@ -165,13 +182,15 @@ cat(stan_code )
 ## AT events
 ##############################################################################################################################
 
+# Piecewise exponential https://rpubs.com/kaz_yos/surv_stan_piecewise1
+
+
 fit_leukemia_events <- rstanarm::stan_glm(formula = status ~ -1 + interval + x + offset(log(interval_length)),
                                           data = leukemia_events,
                                           family = poisson(link = "log"))
 rstanarm::prior_summary(fit_leukemia_events)
 fit_leukemia_events
 
-# Piecewise exponential https://rpubs.com/kaz_yos/surv_stan_piecewise1
 
 stan_leuk_events <- stan('model/pem_leuk_stan_SS.stan',
                          data=list(N=NROW(unique(leukemia_events$id)),
@@ -217,11 +236,15 @@ summary(stan_leuk_events2)
 ##
 ##############################################################################################################################
 
-t_obs1 <-  leukemia_events %>% group_by(tid) %>% distinct(interval)
-t_obs <-  as.numeric(as.character( pull(t_obs1, interval)))
+
+## Unstructured model pem_survival_model_unstructured.stan
+t_obs1 <-  leukemia_events %>% group_by(tid) %>% distinct(time)
+t_obs <-  sort(as.numeric(as.character( pull(t_obs1, time))))
 
 
-t_dur <-  c(diff(t_obs), 113)
+t_dur <-  c(t_obs[1], diff(t_obs))   # duration at first timepoint = t_obs[1] ( implicit t0 = 0 )
+
+
 
 stan_leuk_events_pem_un <- stan('model/survivalstan/pem_survival_model_unstructured.stan',
                           data=list(N = dim(leukemia_events)[1],          # total number of observations
@@ -232,7 +255,7 @@ stan_leuk_events_pem_un <- stan('model/survivalstan/pem_survival_model_unstructu
                                     t = leukemia_events$tid,              # timepoint id for each obs
                                     event = as.integer(leukemia_events$status),
                                     x =   as.matrix(as.numeric(leukemia_events$x) - 1),  # covariates matrix
-                                    t_obs =  as.numeric(as.character( pull(t_obs1, interval))),       #observed time since origin for each timepoint id (end of period)
+                                    t_obs =  t_obs,       #observed time since origin for each timepoint id (end of period)
                                     t_dur = t_dur  # duration of each timepoint period (first diff of t_obs)
                                 ),
                           chains = 4,
@@ -245,5 +268,74 @@ stan_leuk_events_pem_un <- stan('model/survivalstan/pem_survival_model_unstructu
 summary(stan_leuk_events_pem_un)
 
 
-as.numeric(distinct(leukemia_events, tid, interval) $interval)
-leukemia_events %>% group_by(tid) %>% distinct(interval)
+
+##############################################################################################################################
+##  pem_survival_model.stan
+##############################################################################################################################
+
+stan_leuk_events_pem <- stan('model/survivalstan/pem_survival_model.stan',
+                                data=list(N = dim(leukemia_events)[1],          # total number of observations
+                                          S = NROW(unique(leukemia_events$id)), # number of ids
+                                          T = max(leukemia_events$tid),         # max timepoint (number of timepoint ids) # max(leukemia_events$time)
+                                          M = 1,                                # number of covatiates
+                                          s = leukemia_events$id,               # sample id for each obs
+                                          t = leukemia_events$tid,              # timepoint id for each obs
+                                          event = as.integer(leukemia_events$status),
+                                          x =   as.matrix(as.numeric(leukemia_events$x) - 1),  # covariates matrix
+                                          obs_t =  as.numeric(leukemia_events$time)       # observed end time for each obs
+                                ),
+                                chains = 1,
+                                warmup = 4000,
+                                iter = 8000,
+                                cores = 4,
+                                refresh = 0,
+                                control = list(adapt_delta = 0.99))
+
+summary(stan_leuk_events_pem)
+
+##############################################################################################################################
+##  pem_survival_model_randomwalk.stan
+##############################################################################################################################
+
+t_obs1 <-  leukemia_events %>% group_by(tid) %>% distinct(time)
+t_obs <-  sort(as.numeric(as.character( pull(t_obs1, time))))
+
+
+t_dur <-  c(t_obs[1], diff(t_obs))   # duration at first timepoint = t_obs[1] ( implicit t0 = 0 )
+
+
+stan_leuk_events_pem_rw <- stan('model/survivalstan/pem_survival_model_randomwalk.stan',
+                             data=list(N = dim(leukemia_events)[1],          # total number of observations
+                                       S = NROW(unique(leukemia_events$id)), # number of ids
+                                       T = max(leukemia_events$tid),         # max timepoint (number of timepoint ids) # max(leukemia_events$time)
+                                       M = 1,                                # number of covatiates
+                                       s = leukemia_events$id,               # sample id for each obs
+                                       t = leukemia_events$tid,              # timepoint id for each obs
+                                       event = as.integer(leukemia_events$status),
+                                       x =   as.matrix(as.numeric(leukemia_events$x) - 1),  # covariates matrix
+                                       t_obs =  t_obs,     #observed time since origin for each timepoint id (end of period)
+                                       t_dur = t_dur  # duration of each timepoint period (first diff of t_obs)
+                             ),
+                             chains = 4,
+                             warmup = 4000,
+                             iter = 8000,
+                             cores = 4,
+                             refresh = 0,
+                             control = list(adapt_delta = 0.99))
+
+summary(stan_leuk_events_pem_rw)
+
+mcmc_trace(stan_leuk_events_pem_rw, pars=c("beta[1]", "baseline_sigma"))
+
+bayesplot::mcmc_areas(as.matrix(stan_leuk_events_pem_rw), pars = c("beta[1]", "baseline_sigma"), prob = 0.95)
+
+stan_weibull_survival_model_draws <- tidybayes::tidy_draws(stan_leuk_events_pem_rw)
+
+# posterior_predict(stan_leuk_events_pem_rw, draws = 500)
+
+yhat_time <- rstan::extract(stan_leuk_events_pem_rw)[["y_hat_time"]]
+yhat_event <- rstan::extract(stan_leuk_events_pem_rw)[["y_hat_event"]] 
+
+plot(apply(yhat_time, 2, mean), apply(yhat_event, 2, mean))
+
+plot(yhat_time, yhat_event)
